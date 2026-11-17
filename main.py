@@ -91,7 +91,7 @@ def health():
     description="Returns every task currently in memory.",
 )
 def list_tasks():
-    return tasks
+    return db.list_tasks()
 
 
 @app.get(
@@ -103,7 +103,10 @@ def list_tasks():
     description="Returns the task with the given id, or 404 if it does not exist.",
 )
 def get_task(task_id: int):
-    return find_task(task_id)
+    task = db.get_task(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+    return task
 
 
 @app.post(

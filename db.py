@@ -43,3 +43,20 @@ def init_db():
         if count == 0:
             # One transaction: either all three seed rows are saved, or none are.
             conn.executemany("INSERT INTO tasks (title, done) VALUES (?, ?)", SEED_TASKS)
+
+
+def _to_task(row):
+    """A database row -> the JSON shape the API has always returned (done is a real bool)."""
+    return {"id": row["id"], "title": row["title"], "done": bool(row["done"])}
+
+
+def list_tasks():
+    with session() as conn:
+        return [_to_task(r) for r in conn.execute("SELECT * FROM tasks")]
+
+
+def get_task(task_id):
+    """Return one task dict, or None if there is no such id."""
+    with session() as conn:
+        row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        return _to_task(row) if row else None
