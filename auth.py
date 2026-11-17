@@ -5,7 +5,7 @@ from typing import Optional
 from urllib.parse import urlparse
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, StrictStr
 from supabase import (
@@ -239,14 +239,70 @@ def verify_token(client: Client, token: str) -> UserOut:
     return UserOut(id=user.id, email=user.email, created_at=user.created_at)
 
 
+class CurrentUser(UserOut):
+    """The verified user attached to a request, plus the token it came with (never sent back to clients)."""
+
+    token: str
+
+    def public(self) -> UserOut:
+        return UserOut(id=self.id, email=self.email, created_at=self.created_at)
+
+
+def require_user(token: str = Depends(extract_token), client: Client = Depends(supabase_client)) -> CurrentUser:
+    """THE GUARD. Add `Depends(require_user)` to any route to make it logged-in-only.
+
+    It extracts the bearer token, has Supabase verify it, and hands the route the verified user.
+    The route body never runs if anything fails.
+    """
+    user = verify_token(client, token)
+    return CurrentUser(id=user.id, email=user.email, created_at=user.created_at, token=token)
+
+
+UNAUTHORIZED = {401: {"model": ErrorOut, "description": "Missing, invalid or expired token"}}
+
+
 @router.get(
     "/protected/profile",
     response_model=UserOut,
-    responses={401: {"model": ErrorOut, "description": "Missing, invalid or expired token"}, **UNAVAILABLE},
+    responses={**UNAUTHORIZED, **UNAVAILABLE},
     tags=["protected"],
     summary="My profile",
     description="Needs `Authorization: Bearer <token>`. The token is verified with Supabase; "
     "returns the user's id, email and account-created date.",
 )
-def profile(token: str = Depends(extract_token), client: Client = Depends(supabase_client)):
-    return verify_token(client, token)
+def profile(user: CurrentUser = Depends(require_user)):
+    return user.public()
+
+
+@router.get(
+    "/protected/dashboard",
+    responses={**UNAUTHORIZED, **UNAVAILABLE},
+    tags=["protected"],
+    summary="Dashboard",
+    description="A second protected route. It uses the same `require_user` guard, with no new auth code.",
+)
+def dashboard(user: CurrentUser = Depends(require_user)):
+    return {"message": f"Welcome back, {user.email}!", "user_id": user.id}
+
+
+@router.post(
+    "/auth/logout",
+    status_code=204,
+    responses={**UNAUTHORIZED, **UNAVAILABLE},
+    tags=["auth"],
+    summary="Log out",
+    description="Needs a bearer token. Ends this session at Supabase and returns 204 with no body. "
+    "Note: a JWT stays technically valid until it expires (Supabase default: 1 hour); logout revokes "
+    "the session and its refresh token, so no new access tokens can be minted from it.",
+)
+def logout(user: CurrentUser = Depends(require_user), client: Client = Depends(supabase_client)):
+    try:
+        # On a server there is no stored session, so client.auth.sign_out() would do nothing.
+        # auth.admin.sign_out(jwt) revokes the session behind THIS token ("local" = just this one).
+        client.auth.admin.sign_out(user.token, "local")
+    except AuthApiError as exc:
+        if exc.status not in (401, 403, 404):  # those mean "already signed out"
+            raise _upstream_failure(exc)
+    except Exception as exc:
+        raise _upstream_failure(exc)
+    return Response(status_code=204)

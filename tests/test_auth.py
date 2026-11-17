@@ -147,3 +147,51 @@ def test_supabase_down_fails_closed_never_200(client, fake, logged_in):
     r = client.get("/protected/profile", headers=bearer(token))
     assert r.status_code == 502
     assert r.json() == {"error": "Authentication service unavailable"}
+
+
+# ---- Stage 4: one reusable guard, logout --------------------------------------
+
+def test_dashboard_reuses_the_guard(client, logged_in):
+    token, email = logged_in
+    assert client.get("/protected/dashboard").status_code == 401
+    assert client.get("/protected/dashboard", headers=bearer("bad.token.here")).status_code == 401
+    ok = client.get("/protected/dashboard", headers=bearer(token))
+    assert ok.status_code == 200 and email in ok.json()["message"]
+
+
+def test_every_protected_route_is_guarded(client):
+    """Fails if someone adds a /protected/* route (or breaks logout) without the guard."""
+    from main import app
+
+    guarded = [
+        (method.upper(), path)
+        for path, ops in app.openapi()["paths"].items()
+        if path.startswith("/protected") or path == "/auth/logout"
+        for method in ops
+    ]
+    assert len(guarded) >= 3  # profile, dashboard, logout
+    for method, path in guarded:
+        assert client.request(method, path).status_code == 401, f"{method} {path} is not guarded"
+        forged = client.request(method, path, headers=bearer("forged.token.value"))
+        assert forged.status_code == 401, f"{method} {path} accepts a forged token"
+
+
+def test_logout_without_or_with_bad_token_is_401_and_revokes_nothing(client, fake):
+    assert client.post("/auth/logout").status_code == 401
+    assert client.post("/auth/logout", headers=bearer("forged")).status_code == 401
+    assert fake.auth.revoked == []
+
+
+def test_logout_returns_204_empty_and_revokes_that_session(client, fake, logged_in):
+    token, _ = logged_in
+    r = client.post("/auth/logout", headers=bearer(token))
+    assert r.status_code == 204
+    assert r.content == b""
+    assert fake.auth.revoked == [token]
+
+
+def test_logout_when_supabase_fails_is_502(client, fake, logged_in):
+    token, _ = logged_in
+    fake.auth._admin_sign_out = None
+    fake.auth.admin.sign_out = lambda jwt, scope="global": (_ for _ in ()).throw(RuntimeError("boom"))
+    assert client.post("/auth/logout", headers=bearer(token)).status_code == 502
