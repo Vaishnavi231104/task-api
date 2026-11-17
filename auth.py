@@ -1,9 +1,20 @@
 """Supabase Auth: client factory and startup check. (Routes are added in the next stages.)"""
 import logging
+from datetime import datetime
+from typing import Optional
 from urllib.parse import urlparse
 
 import httpx
-from supabase import Client, create_client
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, StrictStr
+from supabase import (
+    AuthApiError,
+    AuthError,
+    AuthInvalidCredentialsError,
+    AuthWeakPasswordError,
+    Client,
+    create_client,
+)
 
 import config
 
@@ -44,3 +55,131 @@ def startup_check() -> None:
             log.warning("Supabase answered HTTP %s for %s: check SUPABASE_URL and SUPABASE_KEY", resp.status_code, host)
     except Exception as exc:  # network down, bad URL, ...
         log.warning("Could not reach Supabase at %s: %s", host, type(exc).__name__)
+
+
+# ---------------------------------------------------------------- models
+
+class Credentials(BaseModel):
+    email: Optional[StrictStr] = None
+    password: Optional[StrictStr] = None
+
+
+class UserOut(BaseModel):
+    id: str
+    email: Optional[str] = None
+    created_at: Optional[datetime] = None
+
+
+class TokenOut(BaseModel):
+    access_token: str
+    refresh_token: str
+    token_type: str = "bearer"
+    expires_in: Optional[int] = None
+
+
+class ErrorOut(BaseModel):
+    error: str
+
+
+BAD_REQUEST = {400: {"model": ErrorOut, "description": "Missing or rejected input"}}
+UNAVAILABLE = {502: {"model": ErrorOut, "description": "Supabase could not be reached"}}
+
+
+# ---------------------------------------------------------------- helpers
+
+def supabase_client() -> Client:
+    """FastAPI dependency: a fresh client per request (tests replace this with a fake)."""
+    try:
+        return get_supabase()
+    except AuthNotConfigured:
+        raise HTTPException(status_code=503, detail="Authentication is not configured on this server")
+
+
+def _credentials(body: Credentials) -> tuple[str, str]:
+    email = (body.email or "").strip()
+    password = body.password or ""
+    if not email or not password:
+        raise HTTPException(status_code=400, detail="email and password are required")
+    return email, password
+
+
+def _upstream_failure(exc: Exception) -> HTTPException:
+    """Supabase unreachable or misbehaving. Log the type only (never credentials or tokens)."""
+    log.error("Supabase request failed: %s", type(exc).__name__)
+    return HTTPException(status_code=502, detail="Authentication service unavailable")
+
+
+# ---------------------------------------------------------------- routes
+
+router = APIRouter()
+
+
+@router.post(
+    "/auth/signup",
+    status_code=201,
+    response_model=UserOut,
+    responses={**BAD_REQUEST, **UNAVAILABLE},
+    tags=["auth"],
+    summary="Sign up",
+    description="Creates a user account in Supabase Auth from `email` and `password`. "
+    "Passwords are handled by Supabase; this server never stores or hashes them.",
+)
+def signup(body: Credentials, client: Client = Depends(supabase_client)):
+    email, password = _credentials(body)
+    try:
+        result = client.auth.sign_up({"email": email, "password": password})
+    except AuthApiError as exc:
+        if exc.status >= 500:
+            raise _upstream_failure(exc)
+        raise HTTPException(status_code=400, detail=exc.message)  # e.g. weak password, already registered
+    except AuthError as exc:
+        if isinstance(exc, AuthWeakPasswordError):
+            raise HTTPException(status_code=400, detail=exc.message)
+        raise _upstream_failure(exc)
+    except Exception as exc:
+        raise _upstream_failure(exc)
+    user = getattr(result, "user", None)
+    if user is None:
+        raise _upstream_failure(RuntimeError("no user in sign-up response"))
+    return {"id": user.id, "email": user.email, "created_at": user.created_at}
+
+
+@router.post(
+    "/auth/login",
+    response_model=TokenOut,
+    responses={
+        **BAD_REQUEST,
+        401: {"model": ErrorOut, "description": "Invalid login credentials"},
+        **UNAVAILABLE,
+    },
+    tags=["auth"],
+    summary="Log in",
+    description="Checks `email` and `password` with Supabase and returns the access token (a JWT) "
+    "and refresh token. Send the access token as `Authorization: Bearer <token>` to protected routes.",
+)
+def login(body: Credentials, client: Client = Depends(supabase_client)):
+    email, password = _credentials(body)
+    try:
+        result = client.auth.sign_in_with_password({"email": email, "password": password})
+    except AuthApiError as exc:
+        if exc.status == 429:
+            raise HTTPException(status_code=429, detail="Too many attempts, try again later")
+        if exc.status >= 500:
+            raise _upstream_failure(exc)
+        log.warning("Login rejected by Supabase: status=%s code=%s", exc.status, exc.code)
+        raise HTTPException(status_code=401, detail="Invalid login credentials")
+    except AuthError as exc:
+        if isinstance(exc, (AuthInvalidCredentialsError, AuthWeakPasswordError)):
+            raise HTTPException(status_code=401, detail="Invalid login credentials")
+        raise _upstream_failure(exc)
+    except Exception as exc:
+        raise _upstream_failure(exc)
+    session = getattr(result, "session", None)
+    if session is None or not session.access_token:
+        raise HTTPException(status_code=401, detail="Invalid login credentials")
+    return {
+        "access_token": session.access_token,
+        "refresh_token": session.refresh_token,
+        "token_type": session.token_type or "bearer",
+        "expires_in": session.expires_in,
+    }

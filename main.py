@@ -31,13 +31,20 @@ app = FastAPI(
 @app.exception_handler(StarletteHTTPException)
 async def http_error(request: Request, exc: StarletteHTTPException):
     # Every error is {"error": "..."} as the assignment requires.
-    return JSONResponse(status_code=exc.status_code, content={"error": exc.detail})
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"error": exc.detail},
+        headers=getattr(exc, "headers", None),  # e.g. WWW-Authenticate on 401
+    )
 
 
 @app.exception_handler(RequestValidationError)
 async def bad_request(request: Request, exc: RequestValidationError):
     # Malformed JSON or wrong types -> 400 (FastAPI's default would be 422).
     return JSONResponse(status_code=400, content={"error": "Invalid request body"})
+
+
+app.include_router(auth.router)
 
 
 class Task(BaseModel):
