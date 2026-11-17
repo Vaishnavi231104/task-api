@@ -10,6 +10,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 import auth
 import db
+import triage
 
 
 @asynccontextmanager
@@ -39,13 +40,24 @@ async def http_error(request: Request, exc: StarletteHTTPException):
     )
 
 
+def describe_validation_errors(errors) -> str:
+    """Turn pydantic errors into one readable sentence that NAMES the field, e.g. 'text: Field required'."""
+    parts = []
+    for err in errors[:3]:
+        field = ".".join(str(p) for p in err["loc"] if p not in ("body", "query", "path") and not isinstance(p, int))
+        msg = "malformed JSON" if err["type"] == "json_invalid" else err["msg"].removeprefix("Value error, ")
+        parts.append(f"{field}: {msg}" if field else msg)
+    return "Invalid request body: " + "; ".join(parts)
+
+
 @app.exception_handler(RequestValidationError)
 async def bad_request(request: Request, exc: RequestValidationError):
-    # Malformed JSON or wrong types -> 400 (FastAPI's default would be 422).
-    return JSONResponse(status_code=400, content={"error": "Invalid request body"})
+    # Malformed JSON or wrong types -> 400 (FastAPI's default would be 422), naming the offending field.
+    return JSONResponse(status_code=400, content={"error": describe_validation_errors(exc.errors())})
 
 
 app.include_router(auth.router)
+app.include_router(triage.router)
 
 
 class Task(BaseModel):
