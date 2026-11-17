@@ -112,7 +112,11 @@ def _upstream_failure(exc: Exception) -> HTTPException:
 
 
 # Parses "Authorization: Bearer <token>". auto_error=False so WE choose the 401 body and message.
-bearer_scheme = HTTPBearer(auto_error=False, description="Paste the access_token returned by POST /auth/login")
+bearer_scheme = HTTPBearer(
+    auto_error=False,
+    bearerFormat="JWT",
+    description="Paste the `access_token` returned by POST /auth/login (just the token, without the word Bearer).",
+)
 
 
 def extract_token(credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme)) -> str:

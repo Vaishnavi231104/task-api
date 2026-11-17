@@ -23,8 +23,9 @@ app = FastAPI(
     lifespan=lifespan,
     title="Task API",
     version="1.0",
-    description="A small to-do list API with full CRUD. Tasks are stored in a SQLite "
-    "database file (tasks.db), so they survive server restarts.",
+    description="A small to-do list API with full CRUD (tasks stored in SQLite) plus "
+    "Supabase-backed authentication: sign up, log in, log out and token-protected routes. "
+    "To call a locked route here: log in via POST /auth/login, click **Authorize** and paste the access_token.",
 )
 
 
