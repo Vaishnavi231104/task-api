@@ -1,6 +1,6 @@
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -72,3 +72,23 @@ def create_task(body: TaskIn):
     next_id += 1
     tasks.append(task)
     return task
+
+
+@app.put("/tasks/{task_id}")
+def update_task(task_id: int, body: TaskIn):
+    task = find_task(task_id)  # 404 if unknown
+    if body.title is None and body.done is None:
+        raise HTTPException(status_code=400, detail="Provide a title and/or done")
+    if body.title is not None:
+        if not body.title.strip():
+            raise HTTPException(status_code=400, detail="title must be a non-empty string")
+        task["title"] = body.title.strip()
+    if body.done is not None:
+        task["done"] = body.done
+    return task
+
+
+@app.delete("/tasks/{task_id}", status_code=204)
+def delete_task(task_id: int):
+    tasks.remove(find_task(task_id))  # 404 if unknown
+    return Response(status_code=204)
