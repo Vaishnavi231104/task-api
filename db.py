@@ -60,3 +60,10 @@ def get_task(task_id):
     with session() as conn:
         row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
         return _to_task(row) if row else None
+
+
+def create_task(title):
+    """Insert a new, not-done task; the database assigns the id."""
+    with session() as conn:
+        cur = conn.execute("INSERT INTO tasks (title, done) VALUES (?, ?)", (title, 0))
+        return {"id": cur.lastrowid, "title": title, "done": False}

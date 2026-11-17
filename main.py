@@ -120,13 +120,9 @@ def get_task(task_id: int):
     "The server assigns the next free id and sets `done` to false.",
 )
 def create_task(body: TaskIn):
-    global next_id
     if body.title is None or not body.title.strip():
         raise HTTPException(status_code=400, detail="title is required and must be a non-empty string")
-    task = {"id": next_id, "title": body.title.strip(), "done": False}
-    next_id += 1
-    tasks.append(task)
-    return task
+    return db.create_task(body.title.strip())
 
 
 @app.put(
