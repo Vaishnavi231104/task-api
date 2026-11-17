@@ -95,3 +95,55 @@ def test_protected_without_a_usable_token_is_401(client):
         assert r.status_code == 401, headers
         assert r.json() == {"error": "Access token required"}
         assert r.headers["www-authenticate"] == "Bearer"
+
+
+# ---- Stage 3: the guard verifies the token with Supabase ----------------------
+
+def bearer(token):
+    return {"Authorization": f"Bearer {token}"}
+
+
+def test_valid_token_returns_safe_user_metadata(client, logged_in):
+    token, email = logged_in
+    r = client.get("/protected/profile", headers=bearer(token))
+    assert r.status_code == 200
+    body = r.json()
+    assert set(body) == {"id", "email", "created_at"}
+    assert body["email"] == email
+
+
+def test_token_is_sent_to_supabase_unchanged(client, fake, logged_in):
+    token, _ = logged_in
+    client.get("/protected/profile", headers=bearer(token))
+    assert ("get_user", token) in fake.auth.calls
+
+
+def test_tampered_token_is_401(client, logged_in):
+    token, _ = logged_in
+    tampered = token[:-1] + ("x" if token[-1] != "x" else "y")  # change one character
+    r = client.get("/protected/profile", headers=bearer(tampered))
+    assert r.status_code == 401
+    assert r.json() == {"error": "Invalid or expired token"}
+
+
+def test_garbage_token_is_401(client):
+    r = client.get("/protected/profile", headers=bearer("not.a.jwt"))
+    assert r.status_code == 401
+    assert r.json() == {"error": "Invalid or expired token"}
+
+
+def test_supabase_says_no_user_is_401(client, fake, logged_in):
+    from types import SimpleNamespace
+    fake.auth.get_user = lambda jwt=None: SimpleNamespace(user=None)
+    token, _ = logged_in
+    assert client.get("/protected/profile", headers=bearer(token)).status_code == 401
+    fake.auth.get_user = lambda jwt=None: None
+    assert client.get("/protected/profile", headers=bearer(token)).status_code == 401
+
+
+def test_supabase_down_fails_closed_never_200(client, fake, logged_in):
+    token, _ = logged_in
+    fake.auth.fail_with = RuntimeError("boom")
+    r = client.get("/protected/profile", headers=bearer(token))
+    assert r.status_code == 502
+    assert r.json() == {"error": "Authentication service unavailable"}

@@ -12,6 +12,7 @@ from supabase import (
     AuthApiError,
     AuthError,
     AuthInvalidCredentialsError,
+    AuthRetryableError,
     AuthWeakPasswordError,
     Client,
     create_client,
@@ -212,12 +213,40 @@ def public_info():
     return {"message": "Welcome stranger! This info is public."}
 
 
+def verify_token(client: Client, token: str) -> UserOut:
+    """Ask Supabase whether `token` is a real, unexpired access token. Fails CLOSED:
+    anything other than a clear "yes, this user" is a refusal."""
+    invalid = HTTPException(
+        status_code=401,
+        detail="Invalid or expired token",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        result = client.auth.get_user(token)  # network call to Supabase
+    except AuthApiError as exc:
+        if exc.status == 429 or exc.status >= 500:
+            raise _upstream_failure(exc)  # Supabase trouble is not the user's fault
+        raise invalid  # bad signature, expired, session gone, ...
+    except AuthError as exc:
+        if isinstance(exc, AuthRetryableError):
+            raise _upstream_failure(exc)
+        raise invalid
+    except Exception as exc:
+        raise _upstream_failure(exc)
+    user = getattr(result, "user", None)
+    if user is None or not getattr(user, "id", None):
+        raise invalid
+    return UserOut(id=user.id, email=user.email, created_at=user.created_at)
+
+
 @router.get(
     "/protected/profile",
+    response_model=UserOut,
+    responses={401: {"model": ErrorOut, "description": "Missing, invalid or expired token"}, **UNAVAILABLE},
     tags=["protected"],
     summary="My profile",
-    description="Needs `Authorization: Bearer <token>`. (Stage 2: only checks that a token was sent; "
-    "verification is added in the next stage.)",
+    description="Needs `Authorization: Bearer <token>`. The token is verified with Supabase; "
+    "returns the user's id, email and account-created date.",
 )
-def profile(token: str = Depends(extract_token)):
-    return {"message": "A token was presented (not verified yet)."}
+def profile(token: str = Depends(extract_token), client: Client = Depends(supabase_client)):
+    return verify_token(client, token)
