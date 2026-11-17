@@ -67,3 +67,19 @@ def create_task(title):
     with session() as conn:
         cur = conn.execute("INSERT INTO tasks (title, done) VALUES (?, ?)", (title, 0))
         return {"id": cur.lastrowid, "title": title, "done": False}
+
+
+def update_task(task_id, title, done):
+    """Overwrite title and done for one id. Returns the updated task, or None if no such id."""
+    with session() as conn:
+        cur = conn.execute("UPDATE tasks SET title = ?, done = ? WHERE id = ?", (title, int(done), task_id))
+        if cur.rowcount == 0:
+            return None
+        return {"id": task_id, "title": title, "done": bool(done)}
+
+
+def delete_task(task_id):
+    """Delete one id. Returns True if a row was deleted, False if there was no such id."""
+    with session() as conn:
+        cur = conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+        return cur.rowcount > 0

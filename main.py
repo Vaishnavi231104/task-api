@@ -21,8 +21,8 @@ app = FastAPI(
     lifespan=lifespan,
     title="Task API",
     version="1.0",
-    description="A small to-do list API with full CRUD. Data lives in memory only "
-    "and is lost when the server restarts.",
+    description="A small to-do list API with full CRUD. Tasks are stored in a SQLite "
+    "database file (tasks.db), so they survive server restarts.",
 )
 
 
@@ -36,15 +36,6 @@ async def http_error(request: Request, exc: StarletteHTTPException):
 async def bad_request(request: Request, exc: RequestValidationError):
     # Malformed JSON or wrong types -> 400 (FastAPI's default would be 422).
     return JSONResponse(status_code=400, content={"error": "Invalid request body"})
-
-
-# In-memory "database": gone when the server stops.
-tasks = [
-    {"id": 1, "title": "Learn FastAPI", "done": False},
-    {"id": 2, "title": "Build a CRUD API", "done": False},
-    {"id": 3, "title": "Push to GitHub", "done": False},
-]
-next_id = 4
 
 
 class Task(BaseModel):
@@ -66,11 +57,11 @@ NOT_FOUND = {404: {"model": Error, "description": "No task with that id"}}
 BAD_REQUEST = {400: {"model": Error, "description": "Missing, empty or invalid input"}}
 
 
-def find_task(task_id: int):
-    for task in tasks:
-        if task["id"] == task_id:
-            return task
-    raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+def get_or_404(task_id: int):
+    task = db.get_task(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+    return task
 
 
 @app.get("/", summary="API info", description="Describes this API and lists its endpoints.")
@@ -88,7 +79,7 @@ def health():
     response_model=list[Task],
     tags=["tasks"],
     summary="List all tasks",
-    description="Returns every task currently in memory.",
+    description="Returns every task stored in the database.",
 )
 def list_tasks():
     return db.list_tasks()
@@ -103,10 +94,7 @@ def list_tasks():
     description="Returns the task with the given id, or 404 if it does not exist.",
 )
 def get_task(task_id: int):
-    task = db.get_task(task_id)
-    if task is None:
-        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
-    return task
+    return get_or_404(task_id)
 
 
 @app.post(
@@ -135,16 +123,17 @@ def create_task(body: TaskIn):
     "Unknown id gives 404; an empty or invalid body gives 400.",
 )
 def update_task(task_id: int, body: TaskIn):
-    task = find_task(task_id)  # 404 if unknown
+    task = get_or_404(task_id)  # 404 if unknown
     if body.title is None and body.done is None:
         raise HTTPException(status_code=400, detail="Provide a title and/or done")
+    title, done = task["title"], task["done"]
     if body.title is not None:
         if not body.title.strip():
             raise HTTPException(status_code=400, detail="title must be a non-empty string")
-        task["title"] = body.title.strip()
+        title = body.title.strip()
     if body.done is not None:
-        task["done"] = body.done
-    return task
+        done = body.done
+    return db.update_task(task_id, title, done)
 
 
 @app.delete(
@@ -156,7 +145,8 @@ def update_task(task_id: int, body: TaskIn):
     description="Removes the task. Returns 204 with an empty body, or 404 if the id is unknown.",
 )
 def delete_task(task_id: int):
-    tasks.remove(find_task(task_id))  # 404 if unknown
+    if not db.delete_task(task_id):
+        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
     return Response(status_code=204)
 
 
