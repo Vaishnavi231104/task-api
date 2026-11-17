@@ -6,6 +6,7 @@ from urllib.parse import urlparse
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, StrictStr
 from supabase import (
     AuthApiError,
@@ -109,6 +110,22 @@ def _upstream_failure(exc: Exception) -> HTTPException:
     return HTTPException(status_code=502, detail="Authentication service unavailable")
 
 
+# Parses "Authorization: Bearer <token>". auto_error=False so WE choose the 401 body and message.
+bearer_scheme = HTTPBearer(auto_error=False, description="Paste the access_token returned by POST /auth/login")
+
+
+def extract_token(credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme)) -> str:
+    """Return the bearer token, or answer 401 if the header is missing, malformed, or has no token."""
+    token = credentials.credentials.strip() if credentials else ""
+    if not token:
+        raise HTTPException(
+            status_code=401,
+            detail="Access token required",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return token
+
+
 # ---------------------------------------------------------------- routes
 
 router = APIRouter()
@@ -183,3 +200,24 @@ def login(body: Credentials, client: Client = Depends(supabase_client)):
         "token_type": session.token_type or "bearer",
         "expires_in": session.expires_in,
     }
+
+
+@router.get(
+    "/public/info",
+    tags=["public"],
+    summary="Public info",
+    description="Open to everyone. No token needed.",
+)
+def public_info():
+    return {"message": "Welcome stranger! This info is public."}
+
+
+@router.get(
+    "/protected/profile",
+    tags=["protected"],
+    summary="My profile",
+    description="Needs `Authorization: Bearer <token>`. (Stage 2: only checks that a token was sent; "
+    "verification is added in the next stage.)",
+)
+def profile(token: str = Depends(extract_token)):
+    return {"message": "A token was presented (not verified yet)."}

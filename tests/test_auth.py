@@ -73,3 +73,25 @@ def test_not_configured_is_503_not_a_crash(monkeypatch):
     r = TestClient(app).post("/auth/login", json=CREDS)
     assert r.status_code == 503
     assert "error" in r.json()
+
+
+# ---- Stage 2: public route and the token-presence check -----------------------
+
+def test_public_info_needs_no_token(client):
+    r = client.get("/public/info")
+    assert r.status_code == 200
+    assert r.json() == {"message": "Welcome stranger! This info is public."}
+
+
+def test_protected_without_a_usable_token_is_401(client):
+    for headers in (
+        {},                                    # no header at all
+        {"Authorization": "Bearer"},           # scheme but no token
+        {"Authorization": "Bearer "},          # scheme, blank token
+        {"Authorization": "just-a-token"},     # no scheme: must NOT slip through
+        {"Authorization": "Basic dXNlcjpwdw=="},  # wrong scheme
+    ):
+        r = client.get("/protected/profile", headers=headers)
+        assert r.status_code == 401, headers
+        assert r.json() == {"error": "Access token required"}
+        assert r.headers["www-authenticate"] == "Bearer"
