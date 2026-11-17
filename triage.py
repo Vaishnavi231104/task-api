@@ -9,7 +9,7 @@ router = APIRouter()
 
 @router.post(
     "/triage",
-    response_model=TriageResult,
+    # Stage 2 only: returns the model's raw text. Stage 3 puts response_model=TriageResult back.
     tags=["triage"],
     summary="Classify a messy to-do note",
     description="Sends the note to a language model and returns a **validated** category, priority, "

@@ -19,6 +19,7 @@ def supabase_configured() -> bool:
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "").strip()
 LLM_API_KEY = os.getenv("LLM_API_KEY", "").strip()
 LLM_MODEL = os.getenv("LLM_MODEL", "").strip()
+LLM_PROMPT_VERSION = os.getenv("LLM_PROMPT_VERSION", "v1").strip()  # which prompts/triage-<version>.md to use
 
 
 def _flag(name: str, default: bool) -> bool:
@@ -30,3 +31,7 @@ LLM_STUB = _flag("LLM_STUB", False)         # 1 = never call the model; return a
 LLM_ENABLED = _flag("LLM_ENABLED", True)    # false = kill switch: no model calls, deterministic fallback
 LLM_TIMEOUT = float(os.getenv("LLM_TIMEOUT", "30"))        # seconds per attempt (the SDK default is 600!)
 LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "2"))   # our own retries; the SDK's are switched off
+
+
+def llm_configured() -> bool:
+    return bool(LLM_BASE_URL and LLM_API_KEY and LLM_MODEL)
