@@ -1,30 +1,53 @@
 # Task API
 
 A small to-do list API built with Python and FastAPI. It supports full CRUD
-(create, read, update, delete) on tasks. Tasks are stored in a **SQLite
-database** (`tasks.db`), so they survive server restarts.
+(create, read, update, delete) on tasks, stored in a **SQLite database**
+(`tasks.db`), and **authentication with Supabase Auth**: sign up, log in, log
+out, and routes that only answer to logged-in users.
 
 Interactive docs (Swagger UI) are served at `/docs`.
 
-> History: Assignment 1 kept tasks in a Python list (in memory). Assignment 2
-> (this version) replaced only the storage layer with SQLite. The endpoints did
-> not change.
+> History: Assignment 1 kept tasks in a Python list. Assignment 2 swapped the
+> storage layer for SQLite without changing the endpoints. Assignment 4 (this
+> version) adds Supabase authentication. The task endpoints are unchanged and
+> still open; auth is added as new routes (see [Authentication](#authentication)).
 
 ## Install and run
 
-Requires Python 3.10+. SQLite ships with Python, so there is nothing extra to install.
+Requires Python 3.10+.
 
 ```bash
 python -m venv .venv
 # Windows:  .venv\Scripts\activate      macOS/Linux:  source .venv/bin/activate
 pip install -r requirements.txt
+cp .env.example .env        # then edit .env, see "Set up Supabase" below
 uvicorn main:app --port 8000
 ```
 
-Then open <http://localhost:8000/docs>.
+Then open <http://localhost:8000/docs>. (`python main.py` also works and uses
+`PORT` from `.env`.)
 
 On first start the app creates `tasks.db`, creates the `tasks` table, and seeds
-three example tasks. Nothing to set up by hand.
+three example tasks. Nothing to set up by hand. Without Supabase values in `.env`
+the server still starts and the Tasks API works; the auth routes answer `503`.
+
+### Set up Supabase (about 5 minutes, free, no card)
+
+1. Create a project at <https://supabase.com> (any name).
+2. In **Project Settings → API**, copy the **Project URL** and the **anon / public key**.
+   Never use the `service_role` key: it bypasses all security.
+3. Put them in your `.env` (this file is git-ignored; never commit it):
+
+   ```text
+   SUPABASE_URL=https://your-project-ref.supabase.co
+   SUPABASE_KEY=your_anon_key
+   PORT=8000
+   ```
+
+4. In **Authentication → Sign In / Providers → Email**, turn **"Confirm email" off**
+   so a new signup can log in immediately (practice project only; keep it on in production).
+5. Start the server. The log should say `Server running and connected to Supabase (...)`.
+   If it says `Supabase answered HTTP ...` or `Could not reach Supabase ...`, re-check the two values.
 
 ## Endpoints
 
@@ -40,6 +63,107 @@ three example tasks. Nothing to set up by hand.
 
 A task looks like `{"id": 1, "title": "Learn FastAPI", "done": false}`.
 Every error response is JSON: `{"error": "message"}`.
+
+## Authentication
+
+Supabase stores the accounts, hashes the passwords and signs the tokens. This
+server never stores or hashes a password: it forwards credentials to Supabase,
+and on later requests asks Supabase whether the bearer token is real.
+
+| Method | Path | Needs auth? | Description | Success | Errors |
+|---|---|---|---|---|---|
+| POST | `/auth/signup` | No | Create an account from `{"email", "password"}` | 201 + `{id, email, created_at}` | 400 missing field or rejected by Supabase |
+| POST | `/auth/login` | No | Returns `access_token` and `refresh_token` | 200 | 400 missing field, 401 `Invalid login credentials` |
+| POST | `/auth/logout` | **Yes** | Ends this session at Supabase | 204, empty body | 401 |
+| GET | `/protected/profile` | **Yes** | The caller's `id`, `email`, `created_at` | 200 | 401 |
+| GET | `/protected/dashboard` | **Yes** | A second locked route using the same guard | 200 | 401 |
+| GET | `/public/info` | No | Open to everyone | 200 | |
+
+Send the token as `Authorization: Bearer <access_token>`. A missing, malformed
+(`Authorization: abc`, wrong scheme, empty token) or forged/expired token gets
+`401` with a JSON error (`Access token required` or `Invalid or expired token`).
+If Supabase itself is unreachable the guard answers `502` and refuses access
+(it fails closed; it never lets a request through because verification failed).
+
+### Try it with curl
+
+Works without Supabase keys (real output):
+
+```text
+$ curl -i http://localhost:8000/public/info
+HTTP/1.1 200 OK
+content-type: application/json
+
+{"message":"Welcome stranger! This info is public."}
+
+$ curl -i http://localhost:8000/protected/profile
+HTTP/1.1 401 Unauthorized
+www-authenticate: Bearer
+content-type: application/json
+
+{"error":"Access token required"}
+```
+
+With your Supabase project configured, the full flow is:
+
+```bash
+curl -i -X POST http://localhost:8000/auth/signup -H "Content-Type: application/json" -d '{"email":"test@example.com","password":"password123"}'      # 201
+curl -i -X POST http://localhost:8000/auth/login  -H "Content-Type: application/json" -d '{"email":"test@example.com","password":"password123"}'      # 200 + access_token
+curl -i http://localhost:8000/protected/profile -H "Authorization: Bearer <access_token>"                                                          # 200 + your user
+curl -i http://localhost:8000/protected/profile -H "Authorization: Bearer <access_token with one character changed>"                               # 401
+curl -i -X POST http://localhost:8000/auth/logout -H "Authorization: Bearer <access_token>"                                                        # 204
+```
+
+The login response has this shape (values are placeholders):
+
+```json
+{"access_token": "<jwt>", "refresh_token": "<token>", "token_type": "bearer", "expires_in": 3600}
+```
+
+### Swagger UI with the Authorize padlock
+
+![Swagger UI showing the Authorize button and padlocks on protected routes](docs/swagger-auth.png)
+
+Log in with `POST /auth/login`, click **Authorize**, paste the `access_token`
+(only the token, without the word `Bearer`), then use **Try it out** on
+`GET /protected/profile`.
+
+### How the guard works
+
+`require_user` in [auth.py](auth.py) is a FastAPI dependency: it extracts the
+bearer token, calls Supabase `get_user(token)` (a real network call, so the
+answer is trustworthy), and hands the route the verified user. Any route
+becomes logged-in-only by adding `Depends(require_user)`; `/protected/profile`,
+`/protected/dashboard` and `/auth/logout` all share it, and a test fails if a
+`/protected/*` route is ever left unguarded.
+
+Design notes:
+
+- **A new Supabase client per request.** A shared client remembers the last
+  user who logged in; one per request means sessions can never leak between users.
+- **Logout uses `auth.admin.sign_out(jwt)`.** `auth.sign_out()` only ends a
+  session stored inside the client, and a server holds none, so it would do
+  nothing for the caller. The admin variant revokes the session behind a given
+  token (it calls the same `/logout` endpoint with the user's own token, so the
+  anon key is enough).
+- **Logout is not instant for the access token.** A JWT stays valid until it
+  expires (Supabase default: one hour). Logout revokes the session and refresh
+  token, so no new access tokens can be minted from it.
+- **Tokens and passwords are never logged.**
+
+### Tests
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
+The 22 tests in `tests/test_auth.py` run against a **fake Supabase client**
+(`tests/conftest.py`), so they need no keys and no network. They cover the status
+codes, the `Bearer` parsing edge cases, forged/tampered tokens, Supabase being
+down, and that every protected route is guarded. They check this server's logic
+against a model of Supabase; the real login flow is the curl/Swagger walkthrough above.
+`python tests/check_api.py` still checks the Tasks API against a running server.
 
 ## Why SQLite?
 
