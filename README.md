@@ -203,8 +203,15 @@ HTTP/1.1 400 Bad Request
 {"error":"Invalid request body: text: Field required"}
 ```
 
-> ⏳ **Live model response: not captured yet.** Add your provider key (below),
-> start the server without `LLM_STUB`, and run the same curl to see a real answer.
+Real output from a live model (OpenRouter, 2026-11-17):
+
+```text
+$ curl -i -X POST http://localhost:8000/triage -H "Content-Type: application/json" -d '{"text":"pay the electricity bill before friday"}'
+HTTP/1.1 200 OK
+content-type: application/json
+
+{"category":"finance","priority":"high","confidence":0.95,"reason":"Electricity bill payment with a deadline before Friday."}
+```
 
 ### Job card
 
@@ -226,7 +233,11 @@ hard-coded to a provider.
 | OpenRouter (hosted, free tier) | `https://openrouter.ai/api/v1` | your key | `openrouter/free` |
 | Ollama (local) | `http://localhost:11434/v1/` | `ollama` | `gemma3:1b` |
 
-> ⏳ **Provider and model used for the eval below: not run yet.** Fill in after the live run.
+**Provider used for the eval below: OpenRouter, model `openrouter/free`.** That is a *router*, not one model: it picks a free model per request.
+The eval's 8 calls were served by 6 different models (two of them answered twice) (`nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free`,
+`liquid/lfm-3-1.7b:free`, `particle-ai/particle-1:free`, `baidu/ernie-5.5-flash-preview:free`,
+`inclusionai/ling-3.2-flash:free`, `recursive/flint-v1.0:free`), so the score below is for "whatever the router
+picked", not for one model. The cost log records the model that actually answered (`served_model`).
 
 OpenRouter free models answer 404 until you turn on both options at
 <https://openrouter.ai/settings/privacy>, and free endpoints may train on or
@@ -257,20 +268,37 @@ examples inside the prompt, so the score is not inflated. Run it against a runni
 python evals/run_eval.py --save        # prints per-case results; --save writes evals/last-run.json
 ```
 
-> ⏳ **Eval score: not run yet.** After the live run, record here exactly what you
-> got, for example `5/8 category (62.5%) on 2026-MM-DD, prompt v1, model X`, and
-> the failing cases. A number you can compare is worth more than a high one.
+**Result (2026-11-17, prompt `v1`, `openrouter/free`): 8 / 8 on the key field `category` (100%).**
+Priority matched 5 of 6 scored cases, and the "when unsure" rule held 2 of 2 (the vague note and the
+prompt-injection note were both labelled `other` with confidence 0.15 and 0.1). Raw results are in
+[evals/last-run.json](evals/last-run.json).
+
+The one miss was priority on case #3, "Book a dentist check-up sometime next month": I labelled it `low`,
+the model said `normal` ("no near-term deadline"). That is a fair disagreement, not an obvious error; it shows the
+prompt's `low` definition ("optional or someday") does not clearly cover "has to happen, but not soon".
+
+Caveat: 8 cases is a small, fairly easy set, and a free router changes models between runs, so treat 100% as
+"the pipeline works", not "the classifier is solved". The next prompt change should be compared against this run.
 
 The runner itself is tested offline (`tests/test_evals.py`): it scores perfect
 answers 8/8 and wrong answers 0/8.
 
 ### Cost
 
-> ⏳ **Cost of one call: not measured yet.** Copy one line from `logs/llm-calls.jsonl`
-> after the live run and estimate 10,000 requests a day from its token counts.
+One real cost-log line (from `logs/llm-calls.jsonl`, the first eval call):
 
-The prompt is about 2,500 characters, so expect roughly 700 input tokens and
-under 100 output tokens per call (an estimate until measured).
+```json
+{"ts": "2026-11-17T18:04:49+00:00", "prompt_version": "v1", "model": "openrouter/free", "served_model": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free", "input_tokens": 678, "output_tokens": 129, "duration_ms": 4142, "repaired": false, "attempts": 1, "model_calls": 1, "outcome": "ok"}
+```
+
+Measured over the 8 eval calls: about **682 input tokens** (almost all of it the prompt) and **161 output tokens**
+on average (51 to 301: some of the free models are "reasoning" models that spend extra tokens), taking 1.1 to 4.3 s.
+
+**Estimate for 10,000 requests a day:** about 6.8 million input and 1.6 million output tokens per day. On the free
+tier that costs $0 but is impossible anyway (the limit is 50 requests a day), so 10,000 a day needs a paid model; for
+scale only, at an *illustrative* $0.10 / $0.40 per million input / output tokens (not a real quote) that is about
+$1.30 a day. The biggest lever is the input side (the prompt is re-sent every call), so trimming the examples or
+caching repeated notes would save the most.
 
 ### What I'd fix with another day
 
