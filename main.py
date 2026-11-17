@@ -8,12 +8,14 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, StrictBool, StrictStr
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+import auth
 import db
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db.init_db()  # create tasks.db, the table and the seed rows if needed
+    auth.startup_check()  # logs whether Supabase is reachable; never blocks startup
     yield
 
 
@@ -165,3 +167,11 @@ def custom_openapi():
 
 
 app.openapi = custom_openapi
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    import config
+
+    uvicorn.run("main:app", port=config.PORT)
