@@ -46,3 +46,12 @@ STUB_RESULT = TriageResult(
     confidence=0.5,
     reason="Stub mode: no model was called.",
 )
+
+
+# Deterministic answer when the kill switch (LLM_ENABLED=false) is on. confidence 0.0 says "this is not a real judgement".
+FALLBACK_RESULT = TriageResult(
+    category="other",
+    priority="normal",
+    confidence=0.0,
+    reason="Classification is switched off; no model was called.",
+)

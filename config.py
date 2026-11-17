@@ -29,7 +29,7 @@ def _flag(name: str, default: bool) -> bool:
 
 LLM_STUB = _flag("LLM_STUB", False)         # 1 = never call the model; return a hard-coded valid answer
 LLM_ENABLED = _flag("LLM_ENABLED", True)    # false = kill switch: no model calls, deterministic fallback
-LLM_TIMEOUT = float(os.getenv("LLM_TIMEOUT", "30"))        # seconds per attempt (the SDK default is 600!)
+LLM_TIMEOUT = min(float(os.getenv("LLM_TIMEOUT", "30")), 60.0)  # seconds per attempt, max 60 (the SDK default is 600!)
 LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "2"))   # our own retries; the SDK's are switched off
 
 

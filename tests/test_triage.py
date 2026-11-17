@@ -212,3 +212,169 @@ def test_the_process_survives_a_failure_and_serves_the_next_request(client, fake
     fake.say("junk", "junk", GOOD)
     assert client.post("/triage", json=VALID).status_code == 422
     assert client.post("/triage", json=VALID).status_code == 200
+
+
+# ---- Stage 4: timeout, retry policy, cost log, kill switch ----------------------------
+
+@pytest.fixture
+def sleeps(monkeypatch):
+    """Replace the real backoff sleep so tests are instant; records every wait. Jitter fixed at 0.25."""
+    import llm.client as lc
+    waited = []
+    monkeypatch.setattr(lc, "_sleep", waited.append)
+    monkeypatch.setattr(lc, "_jitter", lambda: 0.25)
+    return waited
+
+
+@pytest.fixture
+def call_log(tmp_path, monkeypatch, quarantine_file):
+    import llm.calllog as cl
+    path = tmp_path / "llm-calls.jsonl"
+    monkeypatch.setattr(cl, "CALL_LOG_PATH", path)
+    return path
+
+
+def test_client_has_an_explicit_timeout_and_the_sdk_retries_are_off(monkeypatch):
+    from llm.client import make_client
+    monkeypatch.setattr(config, "LLM_API_KEY", "test-key")
+    c = make_client()
+    assert c.max_retries == 0                       # we own the retry policy; no silent SDK retries
+    assert c.timeout == config.LLM_TIMEOUT
+    assert 0 < config.LLM_TIMEOUT <= 60             # never the SDK's 10-minute default
+
+
+def test_slow_model_gives_504_after_retries_and_the_process_lives(client, fake, sleeps, call_log, monkeypatch):
+    monkeypatch.setattr(config, "LLM_TIMEOUT", 0.2)
+    monkeypatch.setattr(config, "LLM_MAX_RETRIES", 2)
+    fake.slow(1.0)
+    fake.slow(1.0)
+    fake.slow(1.0)
+    r = client.post("/triage", json=VALID)
+    assert r.status_code == 504
+    assert "did not answer in time" in r.json()["error"]
+    assert len(fake.requests) == 3                  # 1 try + 2 retries, then it stops
+    assert sleeps == [1.25, 2.25]                   # exponential backoff (1s, 2s) + jitter
+    assert lines(call_log)[0]["outcome"] == "timeout"
+    fake.say(GOOD)
+    assert client.post("/triage", json=VALID).status_code == 200
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 404])
+def test_these_errors_are_never_retried(client, fake, sleeps, call_log, status):
+    fake.fail(status, message="SECRET-PROVIDER-DETAIL")
+    r = client.post("/triage", json=VALID)
+    assert r.status_code == 502
+    assert len(fake.requests) == 1                  # fails fast: ONE request, no retry
+    assert sleeps == []
+    assert "SECRET-PROVIDER-DETAIL" not in r.text and "test-key" not in r.text   # no provider/config leakage
+    assert "error" in r.json()
+
+
+def test_a_bad_key_says_so_clearly(client, fake, sleeps, call_log):
+    fake.fail(401)
+    r = client.post("/triage", json=VALID)
+    assert r.status_code == 502 and "credentials" in r.json()["error"]
+    assert lines(call_log)[0]["outcome"] == "auth_error" and lines(call_log)[0]["attempts"] == 1
+
+
+def test_429_obeys_retry_after_instead_of_guessing(client, fake, sleeps, call_log):
+    fake.fail(429, {"Retry-After": "2"})
+    fake.say(GOOD)
+    r = client.post("/triage", json=VALID)
+    assert r.status_code == 200
+    assert len(fake.requests) == 2
+    assert sleeps == [2.0]                          # the header's value, not 1.25
+
+
+def test_429_without_a_header_backs_off_exponentially_then_503(client, fake, sleeps, call_log):
+    fake.fail(429)
+    fake.fail(429)
+    fake.fail(429)
+    r = client.post("/triage", json=VALID)
+    assert r.status_code == 503 and "rate-limited" in r.json()["error"]
+    assert len(fake.requests) == 3 and sleeps == [1.25, 2.25]
+
+
+def test_a_huge_retry_after_is_not_waited_out(client, fake, sleeps, call_log):
+    fake.fail(429, {"Retry-After": "120"})
+    r = client.post("/triage", json=VALID)
+    assert r.status_code == 503
+    assert r.headers["retry-after"] == "120"        # tell the caller instead of holding the connection
+    assert len(fake.requests) == 1 and sleeps == []
+
+
+@pytest.mark.parametrize("status", [500, 502, 503])
+def test_5xx_is_retried_and_can_recover(client, fake, sleeps, call_log, status):
+    fake.fail(status)
+    fake.say(GOOD)
+    r = client.post("/triage", json=VALID)
+    assert r.status_code == 200 and len(fake.requests) == 2 and sleeps == [1.25]
+
+
+def test_5xx_all_the_way_is_502_without_provider_details(client, fake, sleeps, call_log):
+    for _ in range(3):
+        fake.fail(500, message="SECRET-PROVIDER-DETAIL")
+    r = client.post("/triage", json=VALID)
+    assert r.status_code == 502 and "SECRET-PROVIDER-DETAIL" not in r.text
+    assert len(fake.requests) == 3
+
+
+def test_connection_refused_is_retried_then_502(client, sleeps, call_log, monkeypatch):
+    monkeypatch.setattr(config, "LLM_BASE_URL", "http://127.0.0.1:9/v1")  # nothing listens here
+    monkeypatch.setattr(config, "LLM_API_KEY", "test-key")
+    monkeypatch.setattr(config, "LLM_MODEL", "fake-model")
+    monkeypatch.setattr(config, "LLM_STUB", False)
+    r = client.post("/triage", json=VALID)
+    assert r.status_code == 502
+    assert len(sleeps) == 2
+
+
+def test_cost_log_has_one_line_per_request_with_the_required_fields(client, fake, call_log):
+    bad = '{"category": "weather", "priority": "low", "confidence": 0.5, "reason": "x"}'
+    fake.say(bad, GOOD)   # needs a repair: two model calls, 100+20 tokens each
+    assert client.post("/triage", json=VALID).status_code == 200
+    (record,) = lines(call_log)
+    assert record["prompt_version"] == "v1" and record["model"] == "fake-model"
+    assert record["input_tokens"] == 200 and record["output_tokens"] == 40
+    assert isinstance(record["duration_ms"], int) and record["duration_ms"] >= 0
+    assert record["repaired"] is True and record["model_calls"] == 2 and record["outcome"] == "ok"
+    text = call_log.read_text(encoding="utf-8")
+    assert "test-key" not in text and "electricity" not in text      # no keys, no user text in the cost log
+
+
+def test_clean_call_logs_repaired_false(client, fake, call_log):
+    fake.say(GOOD)
+    client.post("/triage", json=VALID)
+    (record,) = lines(call_log)
+    assert record["repaired"] is False and record["model_calls"] == 1 and record["attempts"] == 1
+
+
+def test_validation_failure_is_logged_as_invalid_output(client, fake, call_log):
+    fake.say("junk", "junk")
+    assert client.post("/triage", json=VALID).status_code == 422
+    (record,) = lines(call_log)
+    assert record["outcome"] == "invalid_output" and record["repaired"] is True
+
+
+def test_kill_switch_answers_with_the_fallback_and_makes_zero_model_calls(client, fake, call_log, monkeypatch):
+    monkeypatch.setattr(config, "LLM_ENABLED", False)
+    r = client.post("/triage", json=VALID)
+    assert r.status_code == 200
+    body = r.json()
+    assert set(body) == {"category", "priority", "confidence", "reason"}
+    assert body["category"] == "other" and body["confidence"] == 0.0
+    assert r.headers["x-llm-fallback"] == "disabled"
+    assert fake.requests == []                                      # the provider was never contacted
+    assert lines(call_log) == []                                    # and nothing was logged as a model call
+
+
+def test_kill_switch_beats_stub_mode(client, fake, monkeypatch):
+    monkeypatch.setattr(config, "LLM_ENABLED", False)
+    monkeypatch.setattr(config, "LLM_STUB", True)
+    r = client.post("/triage", json=VALID)
+    assert r.headers["x-llm-fallback"] == "disabled" and fake.requests == []
+
+
+def test_bad_input_still_costs_nothing_even_with_the_model_on(client, fake, call_log):
+    assert client.post("/triage", json={"text": ""}).status_code == 400
+    assert fake.requests == [] and lines(call_log) == []
