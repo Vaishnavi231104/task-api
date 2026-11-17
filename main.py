@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -7,7 +8,17 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, StrictBool, StrictStr
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+import db
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    db.init_db()  # create tasks.db, the table and the seed rows if needed
+    yield
+
+
 app = FastAPI(
+    lifespan=lifespan,
     title="Task API",
     version="1.0",
     description="A small to-do list API with full CRUD. Data lives in memory only "
