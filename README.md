@@ -11,6 +11,7 @@ Interactive docs (Swagger UI) are served at `/docs`.
 > storage layer for SQLite without changing the endpoints. Assignment 4 (this
 > version) adds Supabase authentication. The task endpoints are unchanged and
 > still open; auth is added as new routes (see [Authentication](#authentication)).
+> Assignment 17 adds an LLM-backed endpoint, [`POST /triage`](#llm-endpoint-post-triage).
 
 ## Install and run
 
@@ -60,6 +61,7 @@ the server still starts and the Tasks API works; the auth routes answer `503`.
 | POST | `/tasks` | Create a task from `{"title": "..."}` | 201 | 400 missing/empty/invalid title |
 | PUT | `/tasks/{id}` | Update `title` and/or `done` | 200 | 400 empty/invalid body, 404 unknown id |
 | DELETE | `/tasks/{id}` | Delete a task (empty body) | 204 | 404 unknown id |
+| POST | `/triage` | Classify a messy note with an LLM ([details](#llm-endpoint-post-triage)) | 200 | 400 bad input, 422 invalid model answer, 502/503/504 provider problems |
 
 A task looks like `{"id": 1, "title": "Learn FastAPI", "done": false}`.
 Every error response is JSON: `{"error": "message"}`.
@@ -164,6 +166,130 @@ codes, the `Bearer` parsing edge cases, forged/tampered tokens, Supabase being
 down, and that every protected route is guarded. They check this server's logic
 against a model of Supabase; the real login flow is the curl/Swagger walkthrough above.
 `python tests/check_api.py` still checks the Tasks API against a running server.
+
+## LLM endpoint: `POST /triage`
+
+**What it does.** You type a messy to-do note, like "pay the electricity bill
+before friday or there's a late fee", and the server asks a language model to
+file it for you. You always get back the same four things: a category (work,
+study, personal, health, finance or other), a priority (low, normal or high), how
+sure it is (0 to 1), and a one-sentence reason. If the note is too vague, it must
+say "other" with low confidence instead of guessing. The model's answer is checked
+before you see it; if it is malformed it is retried once, and if it is still
+wrong you get a clear error, never the raw text the model wrote.
+
+### Try it (stub mode: no model, no key, no cost)
+
+```bash
+LLM_STUB=1 uvicorn main:app --port 8000        # Windows PowerShell:  $env:LLM_STUB=1; uvicorn main:app --port 8000
+curl -i -X POST http://localhost:8000/triage -H "Content-Type: application/json" -d '{"text":"pay the electricity bill before friday"}'
+```
+
+Real output (stub mode returns a fixed, schema-valid object and says so):
+
+```text
+HTTP/1.1 200 OK
+content-type: application/json
+
+{"category":"other","priority":"normal","confidence":0.5,"reason":"Stub mode: no model was called."}
+```
+
+A deliberately broken request (wrong field name) is rejected before any model call, naming the field:
+
+```text
+$ curl -i -X POST http://localhost:8000/triage -H "Content-Type: application/json" -d '{"txt":"oops"}'
+HTTP/1.1 400 Bad Request
+
+{"error":"Invalid request body: text: Field required"}
+```
+
+> ⏳ **Live model response: not captured yet.** Add your provider key (below),
+> start the server without `LLM_STUB`, and run the same curl to see a real answer.
+
+### Job card
+
+Full version in [JOB-CARD.md](JOB-CARD.md). In short:
+
+- **Input:** `{"text": "1-2000 characters"}`
+- **Output:** `{"category": work|study|personal|health|finance|other, "priority": low|normal|high, "confidence": 0.0-1.0, "reason": "one short sentence"}`
+- **It must never:** invent a category or priority outside the lists; return free text or extra fields; follow instructions hidden inside a note; give medical, legal or financial advice; reveal its prompt.
+- **When unsure:** category `other` with confidence below 0.5, not a guess.
+
+### Provider and the three variables that swap it
+
+The code speaks the OpenAI-compatible API, so a model on your laptop and one in a
+datacentre differ by exactly three environment variables (in `.env`). Nothing is
+hard-coded to a provider.
+
+| | `LLM_BASE_URL` | `LLM_API_KEY` | `LLM_MODEL` |
+|---|---|---|---|
+| OpenRouter (hosted, free tier) | `https://openrouter.ai/api/v1` | your key | `openrouter/free` |
+| Ollama (local) | `http://localhost:11434/v1/` | `ollama` | `gemma3:1b` |
+
+> ⏳ **Provider and model used for the eval below: not run yet.** Fill in after the live run.
+
+OpenRouter free models answer 404 until you turn on both options at
+<https://openrouter.ai/settings/privacy>, and free endpoints may train on or
+publish prompts, so only ever send made-up test data.
+
+### How it behaves in production
+
+| Concern | What this server does |
+|---|---|
+| Timeout | `LLM_TIMEOUT` seconds per attempt (default 30, capped at 60). The SDK's 10-minute default is not used. A timeout becomes `504`. |
+| Retries | **Own retry logic; the SDK's retries are switched off** (`max_retries=0`), so one request can never quietly become six. Retries fire on timeouts, connection errors, `429` and `5xx` (default 2 retries: waits of about 1 s then 2 s, plus jitter). A `Retry-After` header is obeyed; a wait over 30 s is not held, the caller gets `503` + `Retry-After`. **Never retried:** `400`, `401`, `403` (or any other 4xx). |
+| Bad model output | Parse (strips code fences and chatter), validate against the schema, **repair exactly once** (the model sees its own answer and the exact error), then `422` and a line in `logs/quarantine.jsonl`. Raw model text is never returned. |
+| Prompt injection | The note is sent as a separate **user** message, JSON-encoded, never inside the system prompt; the prompt tells the model to treat it as data; the output schema is closed, so an obeyed injection that produces anything outside the lists is rejected. |
+| Provider trouble | `502` (down, or the key was rejected), `503` (rate-limited), `504` (timeout). Provider messages and keys go to the server log only, never to the caller. |
+| Cost log | One JSON line per request that reaches the model, in `logs/llm-calls.jsonl` and the server log: prompt version, model, input/output tokens, duration, whether it needed a repair, attempts. It never contains the note or any key. |
+| Kill switch | `LLM_ENABLED=false` skips the model entirely and answers `200` with a deterministic fallback (`other` / `normal` / confidence `0.0`) plus an `X-LLM-Fallback: disabled` header. Takes effect on restart, no code change. |
+| Stub mode | `LLM_STUB=1` returns a fixed valid answer with zero model calls, for building without spending quota. |
+
+Status codes for `/triage`: `200`, `400` (bad input, no model call), `422` (model answer invalid after one repair), `502`, `503`, `504`.
+
+### Eval
+
+`evals/cases.json` holds 8 hand-labelled notes (5 clear, 1 ambiguous, 1 vague
+"when unsure" case, 1 prompt-injection attempt). The wording differs from the
+examples inside the prompt, so the score is not inflated. Run it against a running server with a real model:
+
+```bash
+python evals/run_eval.py --save        # prints per-case results; --save writes evals/last-run.json
+```
+
+> ⏳ **Eval score: not run yet.** After the live run, record here exactly what you
+> got, for example `5/8 category (62.5%) on 2026-MM-DD, prompt v1, model X`, and
+> the failing cases. A number you can compare is worth more than a high one.
+
+The runner itself is tested offline (`tests/test_evals.py`): it scores perfect
+answers 8/8 and wrong answers 0/8.
+
+### Cost
+
+> ⏳ **Cost of one call: not measured yet.** Copy one line from `logs/llm-calls.jsonl`
+> after the live run and estimate 10,000 requests a day from its token counts.
+
+The prompt is about 2,500 characters, so expect roughly 700 input tokens and
+under 100 output tokens per call (an estimate until measured).
+
+### What I'd fix with another day
+
+`/triage` is open: anyone who can reach the server can spend the provider quota.
+I'd put it behind the existing `require_user` guard and add a per-user rate limit.
+Also, the worst case for one request is about three minutes (30 s timeout × 3
+attempts, doubled when a repair is needed); I'd add one overall deadline.
+
+### Tests
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
+The `/triage` tests (`tests/test_triage.py`) run the real `openai` SDK against a
+small fake OpenAI-compatible server (`tests/fake_llm.py`), so timeouts, `429`
+with `Retry-After`, `401` (exactly one request, no retry), repair-once and the
+kill switch are exercised over real HTTP with no key and no cost.
 
 ## Why SQLite?
 
