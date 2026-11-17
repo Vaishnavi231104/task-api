@@ -21,12 +21,14 @@ def log_call(
     attempts: int,
     model_calls: int,
     outcome: str,
+    served_model: str | None = None,
 ) -> dict:
     """Record one request. Never includes the note, the answer or any key."""
     record = {
         "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "prompt_version": prompt_version,
-        "model": model,
+        "model": model,                # what we asked for
+        "served_model": served_model,  # what the provider says answered (differs for routers)
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "duration_ms": duration_ms,

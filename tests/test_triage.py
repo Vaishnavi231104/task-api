@@ -335,6 +335,7 @@ def test_cost_log_has_one_line_per_request_with_the_required_fields(client, fake
     assert client.post("/triage", json=VALID).status_code == 200
     (record,) = lines(call_log)
     assert record["prompt_version"] == "v1" and record["model"] == "fake-model"
+    assert record["served_model"] == "fake-model"
     assert record["input_tokens"] == 200 and record["output_tokens"] == 40
     assert isinstance(record["duration_ms"], int) and record["duration_ms"] >= 0
     assert record["repaired"] is True and record["model_calls"] == 2 and record["outcome"] == "ok"

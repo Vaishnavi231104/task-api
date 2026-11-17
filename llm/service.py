@@ -84,4 +84,5 @@ def classify(text: str) -> TriageResult:
             attempts=sum(c.attempts for c in calls) + failed_attempts,
             model_calls=len(calls),
             outcome=outcome,
+            served_model=calls[-1].served_model if calls else None,
         )

@@ -40,6 +40,7 @@ class ChatResult:
     output_tokens: int | None
     duration_ms: int
     attempts: int
+    served_model: str | None = None  # what the provider says actually answered (a router like openrouter/free varies)
 
 
 def make_client() -> OpenAI:
@@ -93,6 +94,7 @@ def chat(messages: list[dict]) -> ChatResult:
                 output_tokens=getattr(usage, "completion_tokens", None),
                 duration_ms=int((time.monotonic() - started) * 1000),
                 attempts=attempt,
+                served_model=getattr(response, "model", None),
             )
         except openai.APITimeoutError:  # before APIConnectionError: it is a subclass
             kind, final = "timeout", LLMTimeout(attempts=attempt)
